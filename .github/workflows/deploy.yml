@@ -1,0 +1,78 @@
+name: Weekly Sanpai Disposition Monitor & GitHub Pages Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  schedule:
+    # Runs every Monday at 07:00 JST (Sunday 22:00 UTC)
+    - cron: "0 22 * * 0"
+  workflow_dispatch:
+    inputs:
+      live_check:
+        description: "Run live HTTP health checks against official prefecture/MLIT portals"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Syntax check multi-agent pipeline
+        run: python -m py_compile pipeline/sanpai_swarm.py
+
+      - name: Run unit tests (Modulo-9, Kyujitai normalizer, permit decoder, verifier)
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Verify and build dispositions dataset (scheduled or manual live check with safe fallback)
+        env:
+          LIVE_CHECK: ${{ github.event.inputs.live_check || 'false' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$LIVE_CHECK" = "true" ] || [ "$EVENT_NAME" = "schedule" ]; then
+            python pipeline/sanpai_swarm.py --verify-seed --live-check --output site/data/dispositions.json || \
+              python pipeline/sanpai_swarm.py --verify-seed --dry-run --output site/data/dispositions.json
+          else
+            python pipeline/sanpai_swarm.py --verify-seed --dry-run --output site/data/dispositions.json
+          fi
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload static web app artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "./site"
+
+  deploy:
+    needs: build-and-verify
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
